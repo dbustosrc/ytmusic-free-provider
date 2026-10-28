@@ -188,12 +188,22 @@ class MemoryStore:
     def remove_staging(self, path):
         self.files.pop(path, None)
 
+    def stat(self, path):
+        if path not in self.files:
+            raise FileNotFoundError()
+        return NS(st_size=len(self.files[path]), st_mtime_ns=123)
+
+    def checksum(self, path):
+        import hashlib
+        return hashlib.sha256(self.files[path]).hexdigest()
+
 
 def manager_for_test(store, tmp_path):
     manager = object.__new__(dl.DownloadManager)
+    manager.stopping = False
     manager.store = store
     manager.provider = NS(logger=logging.getLogger("downloads_test"),
-        get_stream_details=AsyncMock(return_value=NS(audio_format=NS(content_type=NS(value="opus"), sample_rate=48000))))
+        _get_online_stream_details=AsyncMock(return_value=NS(audio_format=NS(content_type=NS(value="opus"), sample_rate=48000))))
 
     async def audio(details):
         yield b"source"
@@ -222,9 +232,10 @@ def test_publish_only_after_validation_and_keep_metadata(monkeypatch, tmp_path):
     asyncio.run(manager.download(VIDEO, {"youtube_id": VIDEO, "title": "Song", "duration": 90}))
     final = ntpath.join(store.target.directory, VIDEO + ".opus")
     assert store.files[final] == b"saved:source"
-    metadata = json.loads(store.files[ntpath.join(store.target.directory, VIDEO + ".json")])
+    metadata = manager.queue.cached(VIDEO)["metadata"]
     assert metadata["youtube_id"] == VIDEO
     assert metadata["sha256"]
+    assert not any(path.endswith(".json") for path in store.files)
     assert not any(path.startswith(store.target.staging) for path in store.files)
 
 
@@ -254,7 +265,7 @@ def test_replay_of_existing_download_does_not_fetch_again(monkeypatch, tmp_path)
     manager = manager_for_test(store, tmp_path)
     monkeypatch.setattr(dl, "validate_audio", AsyncMock(return_value=90))
     asyncio.run(manager.download(VIDEO, {"duration": 90}))
-    manager.provider.get_stream_details.assert_not_called()
+    manager.provider._get_online_stream_details.assert_not_called()
     assert not store.renames
 
 
@@ -299,7 +310,7 @@ def test_real_ffmpeg_stream_copy_tags_and_full_validation(extension, codec, cont
     audio = subprocess.check_output(args + ["-f", container, "pipe:1"])
     store = MemoryStore()
     manager = manager_for_test(store, tmp_path)
-    manager.provider.get_stream_details.return_value.audio_format.content_type.value = extension
+    manager.provider._get_online_stream_details.return_value.audio_format.content_type.value = extension
 
     async def source(details):
         for pos in range(0, len(audio), 512):

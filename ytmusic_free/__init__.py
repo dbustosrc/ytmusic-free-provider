@@ -24,7 +24,7 @@ from __future__ import annotations
 # never reach an install. And Music Assistant would throw it away anyway:
 # ProviderManifest has no version field and mashumaro drops unknown keys, so the
 # manifest object handed to the provider never carries one. See issue #68.
-__version__ = "1.2.3-smb.1"
+__version__ = "1.2.3-smb.2"
 
 import asyncio
 import importlib
@@ -397,6 +397,7 @@ CONF_DOWNLOAD_SMB = "download_smb_directory"
 CONF_DOWNLOAD_USER = "download_smb_username"
 CONF_DOWNLOAD_PASSWORD = "download_smb_password"
 CONF_DOWNLOAD_FREE_GIB = "download_minimum_free_gib"
+CONF_PREFER_DOWNLOADED = "prefer_downloaded_tracks"
 
 # How long a fetched remote blocklist is trusted before a refresh is scheduled.
 # These lists change on the order of days, and the refresh happens in the
@@ -1123,6 +1124,12 @@ def _build_config_entries() -> tuple[ConfigEntry, ...]:
                     label="Download listened tracks to SMB", default_value=False, required=False,
                     description="Save tracks after 30 seconds of actual playback. Downloads run "
                     "in the background; all audio and temporary files stay on the SMB server."),
+        ConfigEntry(key=CONF_PREFER_DOWNLOADED, type=ConfigEntryType.BOOLEAN,
+                    label="Prefer downloaded tracks", default_value=True, required=False,
+                    depends_on=CONF_DOWNLOAD_ENABLED, depends_on_value=True,
+                    description="Look up validated downloads in the local SQLite index and play "
+                    "from SMB when available. Fall back to YouTube if the file is missing or the "
+                    "share does not respond. No audio is stored on the Music Assistant server."),
         ConfigEntry(key=CONF_DOWNLOAD_SMB, type=ConfigEntryType.STRING,
                     label="Remote SMB music directory", default_value="", required=False,
                     depends_on=CONF_DOWNLOAD_ENABLED, depends_on_value=True,
@@ -2783,6 +2790,22 @@ class YoutubeMusicFreeProvider(MusicProvider):
         return self._drop_ai_tracks(tracks, f"song radio for {video_id}")
 
     async def get_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
+        """Prefer indexed remote audio, without contacting YouTube on a cache hit."""
+        downloads = self._downloads
+        preference = self.config.get_value(CONF_PREFER_DOWNLOADED) if self.config else False
+        if downloads is not None and preference is not False and media_type == MediaType.TRACK:
+            video_id, start, end = _split_track_id(item_id)
+            if entry := await downloads.playback.lookup(video_id):
+                return self._apply_stream_trim(StreamDetails(
+                    provider=self.instance_id, item_id=item_id, stream_type=StreamType.CUSTOM,
+                    audio_format=AudioFormat(content_type=ContentType.PCM_F32LE,
+                                             sample_rate=48000, bit_depth=32, channels=2),
+                    path=f"smb-cache:{video_id}", can_seek=False, allow_seek=True,
+                    duration=entry["metadata"].get("duration"), data={"cache_entry": entry},
+                ), start, end)
+        return await self._get_online_stream_details(item_id, media_type)
+
+    async def _get_online_stream_details(self, item_id: str, media_type: MediaType) -> StreamDetails:
         """Return stream details for the given track or podcast episode.
 
         ``item_id`` may carry a trim window (``VIDEOID@start-end``): the bare
@@ -2872,6 +2895,10 @@ class YoutubeMusicFreeProvider(MusicProvider):
             with suppress(ValueError, TypeError):
                 stream_details.audio_format.bit_rate = int(float(abr))
 
+        return self._apply_stream_trim(stream_details, start, end)
+
+    @staticmethod
+    def _apply_stream_trim(stream_details, start, end):
         # Apply the trim window via ffmpeg input args. -ss as an *input* option
         # seeks before decoding (fast & accurate enough for audio); -t bounds the
         # output duration relative to that seek, so it's computed as end-start.
@@ -2894,6 +2921,23 @@ class YoutubeMusicFreeProvider(MusicProvider):
         return stream_details
 
     async def get_audio_stream(
+        self, streamdetails: StreamDetails, seek_position: int = 0
+    ) -> AsyncGenerator[bytes, None]:
+        """Route cache playback separately from untouched YouTube byte streaming."""
+        from contextlib import aclosing
+
+        data = streamdetails.data if isinstance(streamdetails.data, dict) else {}
+        if entry := data.get("cache_entry"):
+            if self._downloads is None:
+                raise UnplayableMediaError("SMB cache provider was unloaded; retry playback")
+            source = self._downloads.playback.stream(entry)
+        else:
+            source = self._get_youtube_audio_stream(streamdetails, seek_position)
+        async with aclosing(source):
+            async for part in source:
+                yield part
+
+    async def _get_youtube_audio_stream(
         self, streamdetails: StreamDetails, seek_position: int = 0
     ) -> AsyncGenerator[bytes, None]:
         """Stream the resolved audio in bounded-range chunks.

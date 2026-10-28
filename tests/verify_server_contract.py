@@ -120,6 +120,9 @@ def check_download_contract(provider) -> None:
     assert entries[provider.CONF_DOWNLOAD_ENABLED].default_value is False
     assert entries[provider.CONF_DOWNLOAD_SMB].depends_on_value is True
     assert entries[provider.CONF_DOWNLOAD_PASSWORD].type.value == "secure_string"
+    assert entries[provider.CONF_PREFER_DOWNLOADED].default_value is True
+    from music_assistant_models.enums import ContentType
+    assert ContentType.PCM_F32LE.is_pcm()
     assert callable(smbclient.stat_volume) and callable(smbclient.rename)
     assert hasattr(ProviderConfig, "get_value")
     print("SMB download runtime contract ok")

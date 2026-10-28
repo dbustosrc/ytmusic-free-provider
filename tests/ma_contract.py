@@ -45,6 +45,7 @@ TRY_PARSE_EXPECTATIONS: dict[str, str] = {
 # Members the provider references by name. Losing any of these upstream is a
 # breaking change we want to hear about from CI, not from a user report.
 REQUIRED_CONTENT_TYPE_MEMBERS: tuple[str, ...] = (
+    "PCM_F32LE",
     "M4A",
     "MP4",
     "MP4A",

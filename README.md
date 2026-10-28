@@ -16,6 +16,8 @@ In the provider options, enable **Download listened tracks to SMB** to reveal:
   and `share/.ytmusic-free-staging`. SMB2/SMB3 on TCP 445 is required; no host mount
   or extra Docker privileges are needed. Usernames can include `DOMAIN\user`.
 - **Minimum free SMB space (GiB)**, default and minimum 1 GiB.
+- **Prefer downloaded tracks**, on by default when downloads are enabled.
+  Disabling it keeps downloading but always plays from YouTube.
 
 The feature is off by default. It counts advancing playback separately per player
 queue, excluding paused/idle players, stream errors, preloaded items and seeks.
@@ -26,12 +28,12 @@ Only tracks actually streaming through this provider are eligible; listening to
 another linked source does not trigger a YouTube download.
 
 One background worker downloads at a time across provider instances in this MA
-process. Playback never waits for SMB or a download. The queue survives restarts,
+process. Downloads never block playback. The queue survives restarts,
 completed IDs are not downloaded again, and failures receive at most three
 attempts (60 seconds then five minutes between attempts). Failed jobs remain
 recorded instead of retrying on every play. Disabling downloads pauses processing;
 re-enabling the same instance and destination resumes pending jobs. Changing the
-destination uses a separate queue. Queue metadata is the only local storage:
+destination uses a separate queue. Queue/cache metadata is the only local storage:
 `<MA data>/ytmusic_free_downloads/*.sqlite3`. No audio is stored locally and there
 is no fallback to the container's disk if SMB is unavailable.
 
@@ -45,9 +47,11 @@ Downloads are bounded to 256 MiB and 30 minutes per job; the free-space reserve
 is checked before starting and periodically during writes.
 
 Only after validation is the file renamed atomically into the music directory as
-`YOUTUBE_ID.opus` or `YOUTUBE_ID.m4a`. A small `YOUTUBE_ID.json` sidecar preserves
-the source ID, available external IDs, duration, codec, size and checksum for
-later processing. Existing files are never overwritten; a pre-existing matching
+`YOUTUBE_ID.opus` or `YOUTUBE_ID.m4a`. The same local SQLite database that holds
+the queue also indexes validated files by video ID and stores their relative
+filename, source/metadata identifiers, duration, codec, size, checksum, modification
+time and validation time. New downloads do not generate JSON sidecar files.
+Existing files are never overwritten; a pre-existing matching
 ID is validated and reused. Partials remain under
 `share/.ytmusic-free-staging/<destination-id>/`, outside the music directory, and
 are removed after failure/cancellation or overwritten on recovery after a crash.
@@ -58,12 +62,49 @@ The remote music directory can be added separately through MA's existing remote
 filesystem provider. It does not add offline playback to the mobile app. During
 the first listen, playback and downloading use separate network transfers.
 
+### Playback cache
+
+With **Prefer downloaded tracks** enabled, a primary-key SQLite lookup selects a
+validated remote copy before asking YouTube for audio. No directory listing or
+full-library scan runs on playback. The reader opens that exact SMB filename and
+checks its size and modification time. Unchanged files are streamed directly;
+modified timestamps require the stored checksum to match before any audio is
+used. A checksum is also verified as the file is read, without a separate full
+read on each unchanged playback. Files with changed content are rejected rather
+than silently trusting a different recording or overwriting user data.
+
+Opening/checking SMB has a two-second deadline, and individual stream reads have
+a three-second deadline. A separate reader process can be terminated even when
+the SMB library blocks, and a 60-second cooldown avoids repeated network waits
+after an outage. Credentials reach that process through private stdin, never
+command-line arguments. Confirmed missing files are removed from the index and
+become eligible for a fresh download after the listening threshold; connection
+failures retain the index. A full NAS still permits reading cached songs.
+
+If SMB fails, playback falls back to YouTube. Cache playback is decoded to
+48 kHz stereo float PCM in bounded memory. A mid-song fallback decodes YouTube
+into the same format and discards samples up to the last emitted frame, preserving
+the position without concatenating incompatible encoded containers. Recovery can
+pause while a fresh YouTube URL is resolved. The saved Opus/AAC files remain
+unchanged, and no PCM file or local audio cache is created. Normal YouTube-only
+playback retains its original streaming path. Seeking and provider trim windows
+are still applied by Music Assistant.
+
+Completed jobs without index entries are revalidated in the background by their
+exact video IDs using their SQLite metadata. The provider neither reads nor
+writes per-track JSON files and has no JSON compatibility or fallback path.
+Any legacy metadata migration is a separate one-time deployment operation.
+The index survives restart. Restoring the
+database backup preserves it; orphan audio can be adopted and validated when the
+same ID is next downloaded. Search/recommendations still depend on YouTube, and
+this feature does not create a mobile offline player or a separate MA library.
+
 ### Build and maintain this fork
 
 Build the checked-out commit with Docker:
 
 ```sh
-docker build --build-arg MA_VERSION=2.10.6 -t ytmusic-free-smb:1.2.3-smb.1 .
+docker build --build-arg MA_VERSION=2.10.6 -t ytmusic-free-smb:1.2.3-smb.2 .
 ```
 
 For a reproducible deployment, `BASE_IMAGE` can be an existing validated image

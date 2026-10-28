@@ -101,6 +101,7 @@ def _install_music_assistant_models() -> None:
         OPUS = "opus"
         VORBIS = "vorbis"
         FLAC = "flac"
+        PCM_F32LE = "f32le"
         UNKNOWN = "?"
 
         @classmethod
@@ -260,6 +261,7 @@ def _install_music_assistant_models() -> None:
 
     @dataclass
     class _AudioFormat:
+        bit_depth: int = 16
         content_type: object | None = None
         codec_type: object | None = None
         channels: int | None = None

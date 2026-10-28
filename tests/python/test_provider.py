@@ -1686,6 +1686,7 @@ def test_get_config_entries_returns_expected_keys():
         ytm.CONF_AI_BLOCKLIST,
         ytm.CONF_AI_BLOCKLIST_URL,
         ytm.CONF_DOWNLOAD_ENABLED,
+        ytm.CONF_PREFER_DOWNLOADED,
         ytm.CONF_DOWNLOAD_SMB,
         ytm.CONF_DOWNLOAD_USER,
         ytm.CONF_DOWNLOAD_PASSWORD,
@@ -1732,7 +1733,7 @@ def test_instance_get_config_entries_needs_no_init(provider):
     config reads, and no async-init state."""
     provider._ytmusic = None
     entries = asyncio.run(provider.get_config_entries())
-    assert len(entries) == 13
+    assert len(entries) == 14
 
 
 # ---------------------------------------------------------------------------

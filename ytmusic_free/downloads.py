@@ -81,6 +81,12 @@ class DownloadQueue:
                 status TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
                 next_try REAL NOT NULL DEFAULT 0, error TEXT, created REAL NOT NULL)""")
             db.execute("UPDATE jobs SET status='pending' WHERE status='running'")
+            db.execute("""CREATE TABLE IF NOT EXISTS cache_files (
+                video_id TEXT PRIMARY KEY, filename TEXT NOT NULL, metadata TEXT NOT NULL,
+                size INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, validated_at REAL NOT NULL)""")
+            # Existing completed jobs predate the cache index. Revalidate by ID in the worker.
+            db.execute("""UPDATE jobs SET status='pending', attempts=0, next_try=0
+                WHERE status='done' AND video_id NOT IN (SELECT video_id FROM cache_files)""")
 
     @contextmanager
     def connect(self):
@@ -95,11 +101,36 @@ class DownloadQueue:
         if not _VIDEO_ID.fullmatch(video_id):
             raise ValueError("Invalid YouTube video ID")
         with self.connect() as db:
+            reopened = db.execute("""UPDATE jobs SET metadata=?,status='pending',attempts=0,next_try=0,error=NULL
+                WHERE video_id=? AND status='missing'""", (json.dumps(metadata), video_id))
             result = db.execute(
                 "INSERT OR IGNORE INTO jobs(video_id,metadata,created) VALUES(?,?,?)",
                 (video_id, json.dumps(metadata, ensure_ascii=False), time.time()),
             )
-            return result.rowcount == 1
+            return result.rowcount == 1 or reopened.rowcount == 1
+
+    def cached(self, video_id):
+        with self.connect() as db:
+            row = db.execute("SELECT filename,metadata,size,mtime_ns FROM cache_files WHERE video_id=?",
+                             (video_id,)).fetchone()
+        if not row:
+            return None
+        return {"video_id": video_id, "filename": row[0], "metadata": json.loads(row[1]),
+                "size": row[2], "mtime_ns": row[3]}
+
+    def remember(self, video_id, filename, metadata, stat):
+        with self.connect() as db:
+            db.execute("""INSERT INTO cache_files VALUES(?,?,?,?,?,?) ON CONFLICT(video_id)
+                DO UPDATE SET filename=excluded.filename,metadata=excluded.metadata,
+                size=excluded.size,mtime_ns=excluded.mtime_ns,validated_at=excluded.validated_at""",
+                (video_id, filename, json.dumps(metadata, ensure_ascii=False), stat.st_size,
+                 stat.st_mtime_ns, time.time()))
+
+    def unavailable(self, video_id, missing=False):
+        with self.connect() as db:
+            db.execute("DELETE FROM cache_files WHERE video_id=?", (video_id,))
+            db.execute("UPDATE jobs SET status=?,error=NULL WHERE video_id=? AND status='done'",
+                       ("missing" if missing else "invalid", video_id))
 
     def claim(self, now: float):
         with self.connect() as db:
@@ -159,6 +190,16 @@ class SMBStore:
 
     def exists(self, path):
         return self.client.path.exists(path, **self.options)
+
+    def stat(self, path):
+        return self.client.stat(path, **self.options)
+
+    def checksum(self, path):
+        digest = hashlib.sha256()
+        with self.open(path, "rb") as file:
+            while part := file.read(CHUNK_SIZE):
+                digest.update(part)
+        return digest.hexdigest()
 
     def remove_staging(self, path):
         if ntpath.dirname(path) != self.target.staging:
@@ -330,6 +371,8 @@ class DownloadManager:
         self.submitting = set()
         self.worker = None
         self.monitor = None
+        from .smb_cache import PlaybackCache
+        self.playback = PlaybackCache(self)
 
     async def start(self):
         await blocking(self.queue.initialize)
@@ -406,19 +449,19 @@ class DownloadManager:
         from music_assistant_models.enums import MediaType
 
         store = self.store
-        await blocking(store.prepare)
+        # Reusing an existing validated copy requires neither free space nor write access.
         for extension in ("opus", "m4a"):
             existing = ntpath.join(store.target.directory, video_id + "." + extension)
             if await blocking(store.exists, existing):
-                await validate_audio(store, existing, metadata.get("duration"))
+                await self.index_existing(video_id, existing, metadata, extension)
                 return
-        details = await self.provider.get_stream_details(video_id, MediaType.TRACK)
+        await blocking(store.prepare)
+        details = await self.provider._get_online_stream_details(video_id, MediaType.TRACK)
         codec = getattr(details.audio_format.content_type, "value", "")
         extension = "opus" if codec in ("opus", "webm") else "m4a" if codec in ("m4a", "mp4", "mp4a", "aac") else None
         if extension is None:
             raise DownloadError("The selected audio codec cannot be saved without transcoding")
         temporary = ntpath.join(store.target.staging, video_id + ".part." + extension)
-        sidecar = ntpath.join(store.target.staging, video_id + ".part.json")
         final = ntpath.join(store.target.directory, video_id + "." + extension)
         output = None
         size = 0
@@ -442,27 +485,36 @@ class DownloadManager:
             duration = await validate_audio(store, temporary, metadata.get("duration"), digest.hexdigest())
             saved = {**metadata, "duration": duration, "sha256": digest.hexdigest(), "bytes": size,
                      "codec": codec, "sample_rate": details.audio_format.sample_rate}
-
-            def write_sidecar():
-                with store.open(sidecar, "wb") as file:
-                    file.write(json.dumps(saved, ensure_ascii=False).encode())
-
-            await blocking(write_sidecar)
             # Atomic audio rename is the publication point. A collision leaves the old file intact.
             await blocking(store.rename, temporary, final)
-            final_metadata = ntpath.join(store.target.directory, video_id + ".json")
-            if not await blocking(store.exists, final_metadata):
-                await blocking(store.rename, sidecar, final_metadata)
+            stat = await blocking(store.stat, final)
+            await blocking(self.queue.remember, video_id, ntpath.basename(final), saved, stat)
         finally:
             if output:
                 with suppress(Exception):
                     await blocking(output.close)
-            for path in (temporary, sidecar):
-                with suppress(Exception):
-                    await blocking(store.remove_staging, path)
+            with suppress(Exception):
+                await blocking(store.remove_staging, temporary)
+
+    async def index_existing(self, video_id, path, metadata, extension):
+        """Validate an existing audio file by exact ID, using SQLite metadata only."""
+        store = self.store
+        before = await blocking(store.stat, path)
+        saved = dict(metadata)
+        checksum = await blocking(store.checksum, path)
+        if saved.get("sha256") and saved["sha256"] != checksum:
+            raise DownloadError("Existing audio checksum differs from its recorded download")
+        duration = await validate_audio(store, path, saved.get("duration"), checksum)
+        after = await blocking(store.stat, path)
+        if (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns):
+            raise DownloadError("Existing audio changed during validation")
+        saved.update(youtube_id=video_id, sha256=checksum, bytes=after.st_size,
+                     codec="opus" if extension == "opus" else "m4a", duration=duration)
+        await blocking(self.queue.remember, video_id, ntpath.basename(path), saved, after)
 
     async def stop(self):
         self.stopping = True
+        await self.playback.stop()
         if self.monitor:
             self.monitor.cancel()
             with suppress(asyncio.CancelledError):

@@ -99,7 +99,30 @@ def main() -> None:
 
     check_provider_hooks(provider)
     check_auth_notice_contract()
+    check_download_contract(provider)
     print("server contract ok")
+
+
+def check_download_contract(provider) -> None:
+    """Check the real read-only playback surface and the conditional SMB options."""
+    from music_assistant.controllers.player_queues import PlayerQueuesController
+    from music_assistant_models.config_entries import ProviderConfig
+    from music_assistant_models.player_queue import PlayerQueue
+    from music_assistant_models.queue_item import QueueItem
+    import smbclient
+
+    inspect.signature(PlayerQueuesController.all).bind(None)
+    for model, fields in ((PlayerQueue, ("queue_id", "state", "elapsed_time", "current_item")),
+                          (QueueItem, ("queue_item_id", "media_type", "media_item", "streamdetails"))):
+        missing = set(fields) - (set(model.__dataclass_fields__) | set(dir(model)))
+        assert not missing, (model.__name__, missing)
+    entries = {entry.key: entry for entry in provider._build_config_entries()}
+    assert entries[provider.CONF_DOWNLOAD_ENABLED].default_value is False
+    assert entries[provider.CONF_DOWNLOAD_SMB].depends_on_value is True
+    assert entries[provider.CONF_DOWNLOAD_PASSWORD].type.value == "secure_string"
+    assert callable(smbclient.stat_volume) and callable(smbclient.rename)
+    assert hasattr(ProviderConfig, "get_value")
+    print("SMB download runtime contract ok")
 
 
 def check_provider_hooks(provider) -> None:

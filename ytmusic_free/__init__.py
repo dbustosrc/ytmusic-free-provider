@@ -24,7 +24,7 @@ from __future__ import annotations
 # never reach an install. And Music Assistant would throw it away anyway:
 # ProviderManifest has no version field and mashumaro drops unknown keys, so the
 # manifest object handed to the provider never carries one. See issue #68.
-__version__ = "1.2.3"
+__version__ = "1.2.3-smb.1"
 
 import asyncio
 import importlib
@@ -392,6 +392,11 @@ CONF_PREFER_AUDIO_QUALITY = "prefer_audio_quality"
 CONF_FILTER_AI_MUSIC = "filter_ai_music"
 CONF_AI_BLOCKLIST = "ai_blocklist"
 CONF_AI_BLOCKLIST_URL = "ai_blocklist_url"
+CONF_DOWNLOAD_ENABLED = "download_enabled"
+CONF_DOWNLOAD_SMB = "download_smb_directory"
+CONF_DOWNLOAD_USER = "download_smb_username"
+CONF_DOWNLOAD_PASSWORD = "download_smb_password"
+CONF_DOWNLOAD_FREE_GIB = "download_minimum_free_gib"
 
 # How long a fetched remote blocklist is trusted before a refresh is scheduled.
 # These lists change on the order of days, and the refresh happens in the
@@ -1113,6 +1118,31 @@ def _build_config_entries() -> tuple[ConfigEntry, ...]:
     module, applying defaults and letting the cookie be added later from the
     options page, same as on 2.9.
     """
+    download_entries = (
+        ConfigEntry(key=CONF_DOWNLOAD_ENABLED, type=ConfigEntryType.BOOLEAN,
+                    label="Download listened tracks to SMB", default_value=False, required=False,
+                    description="Save tracks after 30 seconds of actual playback. Downloads run "
+                    "in the background; all audio and temporary files stay on the SMB server."),
+        ConfigEntry(key=CONF_DOWNLOAD_SMB, type=ConfigEntryType.STRING,
+                    label="Remote SMB music directory", default_value="", required=False,
+                    depends_on=CONF_DOWNLOAD_ENABLED, depends_on_value=True,
+                    description="Example: smb://nas/share/Music. Include a subdirectory: "
+                    "temporary files use a separate .ytmusic-free-staging directory at the share root. "
+                    "Do not put credentials in this address. No local music library is created."),
+        ConfigEntry(key=CONF_DOWNLOAD_USER, type=ConfigEntryType.STRING,
+                    label="SMB username", default_value="", required=False,
+                    depends_on=CONF_DOWNLOAD_ENABLED, depends_on_value=True,
+                    description="A user with write access to the music directory and staging. "
+                    "Use DOMAIN\\username when needed, or the server's guest account."),
+        ConfigEntry(key=CONF_DOWNLOAD_PASSWORD, type=ConfigEntryType.SECURE_STRING,
+                    label="SMB password", default_value="", required=False,
+                    depends_on=CONF_DOWNLOAD_ENABLED, depends_on_value=True),
+        ConfigEntry(key=CONF_DOWNLOAD_FREE_GIB, type=ConfigEntryType.INTEGER,
+                    label="Minimum free SMB space (GiB)", default_value=1, required=False,
+                    depends_on=CONF_DOWNLOAD_ENABLED, depends_on_value=True,
+                    description="Keep at least this much space free. Minimum 1 GiB. "
+                    "One download at a time, up to three attempts per track."),
+    )
     return (
         ConfigEntry(
             key=CONF_AUTH_TYPE,
@@ -1223,11 +1253,13 @@ def _build_config_entries() -> tuple[ConfigEntry, ...]:
             "background about twice a day; if the URL is unreachable the last good list "
             "keeps working and nothing is filtered that was not already.",
         ),
-    )
+    ) + download_entries
 
 
 class YoutubeMusicFreeProvider(MusicProvider):
     """Provider for YouTube Music without premium subscription."""
+
+    _downloads = None
 
     _ytmusic = None
     _yt_dlp_module = None
@@ -1413,6 +1445,32 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
         if not self._authenticated:
             self.logger.info("YouTube Music (Free) initialized — anonymous mode")
+        await self._start_downloads()
+
+    async def _start_downloads(self) -> None:
+        """Download setup failures must never disable browsing or playback."""
+        self._downloads = None
+        if not self.config.get_value(CONF_DOWNLOAD_ENABLED):
+            return
+        from .downloads import DownloadManager, SMBTarget
+
+        try:
+            target = SMBTarget.parse(str(self.config.get_value(CONF_DOWNLOAD_SMB) or ""))
+            reserve = self.config.get_value(CONF_DOWNLOAD_FREE_GIB)
+            reserve = 1 if reserve is None else int(reserve)
+            if reserve < 1:
+                raise ValueError("The SMB free-space reserve must be at least 1 GiB")
+            username = str(self.config.get_value(CONF_DOWNLOAD_USER) or "")
+            if not username:
+                raise ValueError("An SMB username is required")
+            manager = DownloadManager(self, target, username,
+                                      str(self.config.get_value(CONF_DOWNLOAD_PASSWORD) or ""),
+                                      reserve * 1024 ** 3)
+            await manager.start()
+            self._downloads = manager
+        except Exception as err:
+            self.logger.warning("Background downloads could not start (%s); playback is unaffected",
+                                type(err).__name__)
 
     async def loaded_in_mass(self) -> None:
         """Arrange for the auth notice to be shown once loading has finished.
@@ -1438,6 +1496,9 @@ class YoutubeMusicFreeProvider(MusicProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """Stop a pending auth notice from landing on an unloaded instance."""
+        if self._downloads is not None:
+            await self._downloads.stop()
+            self._downloads = None
         task = self._auth_notice_task
         if isinstance(task, asyncio.Task) and not task.done():
             task.cancel()

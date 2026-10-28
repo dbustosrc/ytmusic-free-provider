@@ -8,7 +8,8 @@
   "documentation": "https://github.com/sproft/ytmusic-free-provider/blob/main/README.md",
   "requirements": [
     "ytmusicapi>=1.7.0",
-    "yt-dlp[default]>=2026.8.18.122307.dev0"
+    "yt-dlp[default]>=2026.8.18.122307.dev0",
+    "smbprotocol==1.17.0"
   ],
   "multi_instance": true
 }

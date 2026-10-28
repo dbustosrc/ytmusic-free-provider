@@ -16,3 +16,4 @@ ytmusicapi>=1.7.0
 # it lazily so the rest of the suite runs without it, but the tests that cover
 # that refresh path need it present.
 aiohttp>=3.9
+smbprotocol==1.17.0

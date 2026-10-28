@@ -1,5 +1,84 @@
 # YouTube Music (Free) Provider
 
+This fork maintains optional SMB downloads and the configured-cookie playback fix.
+Cookie fix submitted upstream: [sproft/ytmusic-free-provider#100](https://github.com/sproft/ytmusic-free-provider/pull/100).
+The original project documentation follows; the SMB feature is specific to this fork.
+
+## Background downloads to SMB (this fork)
+
+In the provider options, enable **Download listened tracks to SMB** to reveal:
+
+- **Remote SMB music directory**, for example `smb://nas/share/Music` or
+  `\\nas\share\Music`. A music subdirectory is required; using the share root
+  is rejected so staging can remain outside the scanned library.
+- **SMB username** and **SMB password** (Music Assistant's protected credential field).
+  The account needs read/write/create/rename/delete access to the music directory
+  and `share/.ytmusic-free-staging`. SMB2/SMB3 on TCP 445 is required; no host mount
+  or extra Docker privileges are needed. Usernames can include `DOMAIN\user`.
+- **Minimum free SMB space (GiB)**, default and minimum 1 GiB.
+
+The feature is off by default. It counts advancing playback separately per player
+queue, excluding paused/idle players, stream errors, preloaded items and seeks.
+After approximately 30 seconds of continuous measured listening, it persists one
+job per YouTube video ID. Sampling runs every two seconds, so the threshold may
+be reached a few seconds later. Tracks shorter than the threshold are not saved.
+Only tracks actually streaming through this provider are eligible; listening to
+another linked source does not trigger a YouTube download.
+
+One background worker downloads at a time across provider instances in this MA
+process. Playback never waits for SMB or a download. The queue survives restarts,
+completed IDs are not downloaded again, and failures receive at most three
+attempts (60 seconds then five minutes between attempts). Failed jobs remain
+recorded instead of retrying on every play. Disabling downloads pauses processing;
+re-enabling the same instance and destination resumes pending jobs. Changing the
+destination uses a separate queue. Queue metadata is the only local storage:
+`<MA data>/ytmusic_free_downloads/*.sqlite3`. No audio is stored locally and there
+is no fallback to the container's disk if SMB is unavailable.
+
+Audio streams directly to a remote temporary file. FFmpeg copies the Opus or AAC
+codec into `.opus` or `.m4a`, embeds title/artist/album and available identifiers,
+then reads back and fully decodes the remote file to verify its checksum and
+duration. No lossy re-encoding or conversion to FLAC is performed. The configured
+playback quality preference also applies to the source selected for downloading.
+The full underlying YouTube video is saved when a queue item has a trim window.
+Downloads are bounded to 256 MiB and 30 minutes per job; the free-space reserve
+is checked before starting and periodically during writes.
+
+Only after validation is the file renamed atomically into the music directory as
+`YOUTUBE_ID.opus` or `YOUTUBE_ID.m4a`. A small `YOUTUBE_ID.json` sidecar preserves
+the source ID, available external IDs, duration, codec, size and checksum for
+later processing. Existing files are never overwritten; a pre-existing matching
+ID is validated and reused. Partials remain under
+`share/.ytmusic-free-staging/<destination-id>/`, outside the music directory, and
+are removed after failure/cancellation or overwritten on recovery after a crash.
+Do not configure Music Assistant to scan the share root or the staging directory.
+
+This feature neither configures a filesystem provider nor imports files into MA.
+The remote music directory can be added separately through MA's existing remote
+filesystem provider. It does not add offline playback to the mobile app. During
+the first listen, playback and downloading use separate network transfers.
+
+### Build and maintain this fork
+
+Build the checked-out commit with Docker:
+
+```sh
+docker build --build-arg MA_VERSION=2.10.6 -t ytmusic-free-smb:1.2.3-smb.1 .
+```
+
+For a reproducible deployment, `BASE_IMAGE` can be an existing validated image
+ID/digest instead of the moving server tag. The build installs SMB support and
+copies the provider normally; no runtime source patching is used. Keep `/data`
+on its existing persistent volume. Update/rebase this fork deliberately when
+choosing new upstream versions, validate first, and retain the prior image for
+rollback. The cookie-only PR branch is independent from the SMB work.
+
+Run `python -m pytest tests/python` for offline checks. When FFmpeg and ffprobe are
+available, these include real Opus/AAC remuxing, tag inspection and full decoding.
+`tests/verify_server_contract.py` runs in the built image against real MA APIs;
+`tests/verify_smb_download.py` uses an isolated disposable Samba fixture, synthetic
+three-second tones and temporary in-container queue state, not a user's library.
+
 An independent, community-built provider that adds free YouTube Music streaming to the open-source [Music Assistant](https://github.com/music-assistant/server) media server, using the same technique as open-source players like [SimpMusic](https://github.com/maxrave-dev/SimpMusic).
 
 > [!IMPORTANT]

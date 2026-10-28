@@ -1685,6 +1685,11 @@ def test_get_config_entries_returns_expected_keys():
         ytm.CONF_FILTER_AI_MUSIC,
         ytm.CONF_AI_BLOCKLIST,
         ytm.CONF_AI_BLOCKLIST_URL,
+        ytm.CONF_DOWNLOAD_ENABLED,
+        ytm.CONF_DOWNLOAD_SMB,
+        ytm.CONF_DOWNLOAD_USER,
+        ytm.CONF_DOWNLOAD_PASSWORD,
+        ytm.CONF_DOWNLOAD_FREE_GIB,
     ]
     cookie_entry = next(e for e in entries if e.key == ytm.CONF_COOKIE)
     assert cookie_entry.depends_on == ytm.CONF_AUTH_TYPE
@@ -1727,7 +1732,7 @@ def test_instance_get_config_entries_needs_no_init(provider):
     config reads, and no async-init state."""
     provider._ytmusic = None
     entries = asyncio.run(provider.get_config_entries())
-    assert len(entries) == 8
+    assert len(entries) == 13
 
 
 # ---------------------------------------------------------------------------

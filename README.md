@@ -79,6 +79,25 @@ available, these include real Opus/AAC remuxing, tag inspection and full decodin
 `tests/verify_smb_download.py` uses an isolated disposable Samba fixture, synthetic
 three-second tones and temporary in-container queue state, not a user's library.
 
+To reproduce the SMB test on a Docker host (replace `CANDIDATE_IMAGE` with the
+image being tested):
+
+```sh
+docker build -t ma-smb-fixture tests/smb_fixture
+docker network create --internal ma-smb-verification-net
+docker run -d --name ma-smb-verification --network ma-smb-verification-net \
+  --tmpfs /srv/music:size=2g ma-smb-fixture
+docker run --rm -i --network container:ma-smb-verification \
+  --tmpfs /verification:rw,noexec,nosuid,size=16m \
+  --entrypoint /app/venv/bin/python CANDIDATE_IMAGE - < tests/verify_smb_download.py
+docker rm -f ma-smb-verification
+docker network rm ma-smb-verification-net
+```
+
+The fixture uses synthetic credentials, has no published ports or persistent
+volumes, and needs an internal bridge rather than loopback-only networking for
+Samba negotiation. Its 2 GiB tmpfs limit does not preallocate that memory.
+
 An independent, community-built provider that adds free YouTube Music streaming to the open-source [Music Assistant](https://github.com/music-assistant/server) media server, using the same technique as open-source players like [SimpMusic](https://github.com/maxrave-dev/SimpMusic).
 
 > [!IMPORTANT]

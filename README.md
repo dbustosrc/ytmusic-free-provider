@@ -4,6 +4,12 @@ This fork maintains optional SMB downloads and the configured-cookie playback fi
 Cookie fix submitted upstream: [sproft/ytmusic-free-provider#100](https://github.com/sproft/ytmusic-free-provider/pull/100).
 The original project documentation follows; the SMB feature is specific to this fork.
 
+Signed-in playback keeps yt-dlp's default clients but excludes `web_embedded`.
+Some accounts receive URLs from that client which stop serving audio after roughly
+1 MiB without a PO token, even after refreshing the URL. Other default clients
+can serve the same full-quality audio. Anonymous playback keeps the unmodified
+defaults. See [yt-dlp #17989](https://github.com/yt-dlp/yt-dlp/issues/17989).
+
 ## Background downloads to SMB (this fork)
 
 In the provider options, enable **Download listened tracks to SMB** to reveal:

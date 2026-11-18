@@ -41,10 +41,12 @@ def test_invalid_cookie_is_credential_safe(header):
 
 def test_extraction_reads_current_cookie_and_keeps_accounts_isolated(provider):
     observed = []
+    clients = []
 
     class Extractor(yt_dlp.YoutubeDL):
         def extract_info(self, url, download=False):
             observed.append({c.name: c.value for c in self.cookiejar})
+            clients.append(self.params["extractor_args"]["youtube"].get("player_client"))
             assert "Cookie" not in self.params.get("http_headers", {})
             return {"formats": [{"format_id": "251", "url": "https://example.invalid/audio",
                                   "ext": "webm", "vcodec": "none", "acodec": "opus"}]}
@@ -60,6 +62,7 @@ def test_extraction_reads_current_cookie_and_keeps_accounts_isolated(provider):
     values["auth_type"] = "none"
     asyncio.run(provider._get_stream_format("synthetic01"))
     assert observed == [{"__Secure-3PAPISID": "first"}, {"__Secure-3PAPISID": "second"}, {}]
+    assert clients == [["default", "-web_embedded"], ["default", "-web_embedded"], None]
 
 
 def test_empty_cookie_keeps_anonymous_behavior():

@@ -24,7 +24,7 @@ from __future__ import annotations
 # never reach an install. And Music Assistant would throw it away anyway:
 # ProviderManifest has no version field and mashumaro drops unknown keys, so the
 # manifest object handed to the provider never carries one. See issue #68.
-__version__ = "1.2.3-smb.2"
+__version__ = "1.2.3-smb.3"
 
 import asyncio
 import importlib
@@ -3954,19 +3954,18 @@ class YoutubeMusicFreeProvider(MusicProvider):
             ydl_opts = {
                 "quiet": True,
                 "no_warnings": True,
-                # Deliberately no "player_client" pin. It is tempting to name the
-                # clients that work without an account, but no single list is valid
-                # across the yt-dlp range the manifest allows: android_vr does not
-                # exist in 2024.01, and android_music was removed by 2026.07, where
-                # the remaining android/ios clients are GVS PO-token gated and yield
-                # no usable anonymous formats at all. yt-dlp's own defaults track
-                # that moving target for us, so let them. See PR #44.
                 "extractor_args": {
                     "youtube": {
                         "skip": ["translated_subs", "dash"]
                     },
                 },
             }
+            if cookie_header:
+                # Signed-in web_embedded URLs can stop at ~1 MiB without a PO token.
+                # Keep yt-dlp's evolving defaults, excluding that client (yt-dlp #17989).
+                ydl_opts["extractor_args"]["youtube"]["player_client"] = [
+                    "default", "-web_embedded"
+                ]
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
                     load_playback_cookies(ydl, cookie_header)
